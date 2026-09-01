@@ -1,18 +1,147 @@
-/* Linqing client overlay: lazy-load complete NetEase playlists without touching
- * upstream's large single-file client. The server injects this file after the
- * upstream scripts have loaded, so we can reuse its existing renderer/actions.
+/* Linqing client overlay: full NetEase playlist paging + two-person account switcher.
+ * Keeps upstream's large single-file client intact. The Linqing server injects this
+ * file after the upstream scripts load, so we can reuse the existing renderer/actions.
  */
 (() => {
   'use strict';
 
   const PAGE_SIZE = 100;
+  const ACCOUNT_KEY = 'linqing-music-account';
+  const ACCOUNT_LABELS = { qingqing: '卿卿', linlin: '老公' };
   const originalRenderPlaylistDetail = renderPlaylistDetail;
-  const originalApi = api;
+  const baseApi = api;
 
+  let selectedAccount = readSavedAccount() || 'qingqing';
   let observer = null;
   let fallbackRoot = null;
   let fallbackScroll = null;
   let session = 0;
+
+  function readSavedAccount() {
+    try { return localStorage.getItem(ACCOUNT_KEY) || ''; } catch { return ''; }
+  }
+
+  function saveAccount(account) {
+    try { localStorage.setItem(ACCOUNT_KEY, account); } catch {}
+  }
+
+  function scopedPath(path) {
+    if (typeof path !== 'string' || !path.startsWith('/music/')) return path;
+    if (path.startsWith('/music/linqing/accounts')) return path;
+    const sep = path.includes('?') ? '&' : '?';
+    return path + sep + 'account=' + encodeURIComponent(selectedAccount);
+  }
+
+  async function accountApi(path, opts) {
+    return baseApi(scopedPath(path), opts);
+  }
+
+  // Route all later player requests through the selected account. apiPost() in the
+  // upstream client calls api(), so POSTs such as like/scrobble follow this too.
+  api = accountApi;
+
+  function installAccountStyles() {
+    if (document.getElementById('linqing-account-style')) return;
+    const style = document.createElement('style');
+    style.id = 'linqing-account-style';
+    style.textContent = `
+      .linqing-account-bar{
+        display:flex; align-items:center; justify-content:center; gap:6px;
+        padding:6px 12px 2px; flex-shrink:0;
+        background:rgba(255,250,252,.42);
+      }
+      .linqing-account-pill{
+        border:1px solid rgba(255,255,255,.92); border-radius:999px;
+        background:rgba(255,255,255,.48); color:var(--ink-soft);
+        min-width:72px; padding:6px 12px; font-size:11px; font-weight:600;
+        letter-spacing:.03em; box-shadow:0 3px 10px rgba(150,90,110,.07);
+        transition:transform var(--t-fast) var(--ease-spring),
+                   background var(--t-fast) var(--ease-out),
+                   color var(--t-fast) var(--ease-out);
+      }
+      .linqing-account-pill:active:not(:disabled){ transform:scale(.96); }
+      .linqing-account-pill.active{
+        color:var(--rose-deep); background:rgba(194,112,138,.14);
+        box-shadow:inset 0 0 0 1px rgba(194,112,138,.08), 0 3px 10px rgba(150,90,110,.08);
+      }
+      .linqing-account-pill:disabled{ opacity:.38; cursor:default; }
+      .linqing-account-pill .slot-dot{
+        display:inline-block; width:5px; height:5px; margin-left:5px;
+        border-radius:50%; background:currentColor; vertical-align:1px; opacity:.55;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function renderAccountBar(accountData) {
+    installAccountStyles();
+    const topbar = document.querySelector('#app > .topbar');
+    if (!topbar) return false;
+
+    document.getElementById('linqing-account-bar')?.remove();
+    const bar = document.createElement('div');
+    bar.id = 'linqing-account-bar';
+    bar.className = 'linqing-account-bar';
+
+    for (const slot of accountData.accounts || []) {
+      const id = String(slot.id || '');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'linqing-account-pill' + (id === selectedAccount ? ' active' : '');
+      btn.dataset.account = id;
+      btn.disabled = !slot.configured;
+      btn.title = slot.configured ? `切到${ACCOUNT_LABELS[id] || id}` : `${ACCOUNT_LABELS[id] || id}账号待入住`;
+      btn.innerHTML = `${ACCOUNT_LABELS[id] || id}${slot.configured ? '' : '<span class="slot-dot"></span>'}`;
+      btn.addEventListener('click', () => {
+        if (!slot.configured || id === selectedAccount) return;
+        selectedAccount = id;
+        saveAccount(id);
+        // Reload gives every upstream boot-time request the cleanest possible reset.
+        location.reload();
+      });
+      bar.appendChild(btn);
+    }
+
+    topbar.insertAdjacentElement('afterend', bar);
+    return true;
+  }
+
+  async function initAccountSwitcher() {
+    let data = null;
+    try {
+      data = await baseApi('/music/linqing/accounts');
+    } catch (err) {
+      console.warn('linqing account slots unavailable', err);
+      return;
+    }
+    if (!data?.ok) return;
+
+    const configured = new Set(
+      (data.accounts || []).filter(x => x.configured).map(x => String(x.id))
+    );
+    if (!configured.has(selectedAccount)) {
+      selectedAccount = configured.has(String(data.default))
+        ? String(data.default)
+        : ((data.accounts || []).find(x => x.configured)?.id || 'qingqing');
+      saveAccount(selectedAccount);
+    }
+
+    if (!renderAccountBar(data)) {
+      const mo = new MutationObserver(() => {
+        if (renderAccountBar(data)) mo.disconnect();
+      });
+      mo.observe(document.getElementById('app') || document.body, { childList: true, subtree: true });
+    }
+
+    // Upstream boot runs before this injected overlay. Refresh account-sensitive state
+    // once so a stored non-default account cannot inherit the default account's hearts.
+    try {
+      if (typeof loadLikedIds === 'function') await loadLikedIds();
+      if (typeof renderTab === 'function') renderTab();
+    } catch (err) {
+      console.warn('linqing account refresh failed', err);
+    }
+  }
 
   function cleanupLazyLoader() {
     if (observer) observer.disconnect();
@@ -122,23 +251,23 @@
     let firstPage = null;
 
     // Upstream currently asks for limit=500. During this one render, transparently
-    // turn that request into the first 100-song page, then give control back.
+    // turn that request into the first 100-song page, then restore account routing.
     api = async function linqingFirstPageApi(path, opts) {
       if (
         typeof path === 'string'
         && path.startsWith('/music/netease/playlist?')
         && path.includes('id=' + encodeURIComponent(pl.id))
       ) {
-        firstPage = await originalApi(playlistUrl(pl, 0), opts);
+        firstPage = await accountApi(playlistUrl(pl, 0), opts);
         return firstPage;
       }
-      return originalApi(path, opts);
+      return accountApi(path, opts);
     };
 
     try {
       await originalRenderPlaylistDetail(container);
     } finally {
-      api = originalApi;
+      api = accountApi;
     }
 
     if (
@@ -167,7 +296,7 @@
       sentinel.textContent = `${plDetailSongs.length} / ${total} · 加载中…`;
 
       try {
-        const page = await originalApi(playlistUrl(pl, nextOffset));
+        const page = await accountApi(playlistUrl(pl, nextOffset));
         if (mySession !== session || playlistDetail !== pl) return;
         if (!page?.ok) throw new Error('playlist page failed');
 
@@ -192,7 +321,6 @@
 
         if (!more) {
           cleanupLazyLoader();
-          // Leave the final count visible for a moment instead of making the list jump.
           setTimeout(() => {
             if (sentinel.isConnected) sentinel.remove();
           }, 1800);
@@ -210,4 +338,6 @@
       : container.closest('.tab-body');
     observeSentinel(root || null, sentinel, loadMore);
   };
+
+  initAccountSwitcher();
 })();
