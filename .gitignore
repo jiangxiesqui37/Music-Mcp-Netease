@@ -1,6 +1,7 @@
 server/data/
 server/.secret
 server/.netease_cred
+server/.netease_accounts/
 __pycache__/
 *.pyc
 .DS_Store
