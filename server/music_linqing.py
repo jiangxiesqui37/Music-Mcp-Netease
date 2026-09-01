@@ -6,16 +6,24 @@ Current changes:
 - rebuild complete NetEase playlists from the full ``trackIds`` list
 - expose page-based reads via ``offset`` + ``limit``
 - inject the small Linqing client overlay that lazy-loads those pages
+- add two local NetEase account slots without committing credentials
 
 Run:
     python3 server/music_linqing.py
 
-The same ``server/.netease_cred``, ``server/.secret`` and ``server/data`` are reused.
+Credential layout:
+    server/.netease_accounts/qingqing.cred
+    server/.netease_accounts/linlin.cred
+
+Each file is one line: ``MUSIC_U=<value>`` and should be mode 600.
+For backward compatibility, the default ``qingqing`` slot also falls back to
+``server/.netease_cred`` while we migrate the existing account.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -28,6 +36,16 @@ class LinqingMusicHandler(MusicHandler):
     NETEASE_DETAIL_BATCH = 100
     NETEASE_PLAYLIST_PAGE_MAX = 500
     CLIENT_OVERLAY_TAG = '<script src="/linqing-pagination.js"></script>'
+
+    ACCOUNT_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+    ACCOUNT_IDS = tuple(
+        x.strip()
+        for x in os.environ.get("LINQING_ACCOUNT_IDS", "qingqing,linlin").split(",")
+        if x.strip()
+    ) or ("qingqing", "linlin")
+    DEFAULT_ACCOUNT = os.environ.get("LINQING_DEFAULT_ACCOUNT", ACCOUNT_IDS[0]).strip() or ACCOUNT_IDS[0]
+    if DEFAULT_ACCOUNT not in ACCOUNT_IDS:
+        DEFAULT_ACCOUNT = ACCOUNT_IDS[0]
 
     def _serve_static(self, path: str):
         """Serve upstream client, injecting our tiny JS overlay into index.html only."""
@@ -57,6 +75,72 @@ class LinqingMusicHandler(MusicHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    # ── Linqing account slots ────────────────────────────────────────────────
+
+    def _requested_account(self) -> str:
+        """Resolve a request-scoped account slot from ``?account=...``."""
+        qs = parse_qs(urlparse(self.path).query)
+        requested = (qs.get("account") or [self.DEFAULT_ACCOUNT])[0].strip().lower()
+        if not self.ACCOUNT_RE.fullmatch(requested):
+            return self.DEFAULT_ACCOUNT
+        if requested not in self.ACCOUNT_IDS:
+            return self.DEFAULT_ACCOUNT
+        return requested
+
+    def _account_cred_path(self, account: str):
+        return HERE / ".netease_accounts" / f"{account}.cred"
+
+    @staticmethod
+    def _read_music_u_file(path) -> str:
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("MUSIC_U="):
+                    value = line.split("=", 1)[1].strip()
+                    if value:
+                        return value
+        except OSError:
+            pass
+        return ""
+
+    def _music_u_for_account(self, account: str) -> str:
+        value = self._read_music_u_file(self._account_cred_path(account))
+        if value:
+            return value
+        # Keep the existing account working until its credential is moved into the
+        # new slot directory. Only the default slot may use this legacy fallback.
+        if account == self.DEFAULT_ACCOUNT:
+            return self._read_music_u_file(HERE / ".netease_cred")
+        return ""
+
+    def _netease_cookie(self) -> str:
+        """Override upstream cookie lookup with request-scoped account routing."""
+        value = self._music_u_for_account(self._requested_account())
+        return f"MUSIC_U={value}" if value else ""
+
+    def _handle_linqing_accounts(self):
+        accounts = []
+        for account in self.ACCOUNT_IDS:
+            accounts.append({
+                "id": account,
+                "configured": bool(self._music_u_for_account(account)),
+                "default": account == self.DEFAULT_ACCOUNT,
+            })
+        self._send_json(200, {
+            "ok": True,
+            "default": self.DEFAULT_ACCOUNT,
+            "accounts": accounts,
+        })
+
+    def do_GET(self):
+        if urlparse(self.path).path == "/music/linqing/accounts":
+            if not self._require_auth():
+                return
+            self._handle_linqing_accounts()
+            return
+        return super().do_GET()
+
+    # ── Full NetEase playlist paging ────────────────────────────────────────
 
     @staticmethod
     def _normalize_netease_song(track: dict) -> dict:
@@ -177,10 +261,7 @@ def main():
     server = ThreadingHTTPServer((state.host, state.port), LinqingMusicHandler)
     logger.info("music-linqing starting on %s:%d", state.host, state.port)
     logger.info("Data dir: %s", state.data_dir)
-    logger.info(
-        "Netease cookie: %s",
-        "configured" if (HERE / ".netease_cred").exists() else "NOT FOUND",
-    )
+    logger.info("Netease account slots: %s", ",".join(LinqingMusicHandler.ACCOUNT_IDS))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
