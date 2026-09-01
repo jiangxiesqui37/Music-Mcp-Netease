@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Privacy-safe smoke check for the Linqing lazy playlist client plumbing.
+"""Privacy-safe smoke check for the Linqing lazy playlist + account UI plumbing.
 
 Requires ``server/music_linqing.py`` to be running on localhost. Prints counts and
-feature flags only. No account name, uid, playlist name, song title, artist, or cookie.
+feature flags only. No account nickname, uid, playlist name, song title, artist, or cookie.
 """
 
 from __future__ import annotations
@@ -36,8 +36,16 @@ def main() -> int:
     js_has_page_100 = "const PAGE_SIZE = 100" in js
     js_has_observer = "IntersectionObserver" in js
     js_has_lazy_renderer = "linqingRenderPlaylistDetail" in js
+    js_has_account_key = "linqing-music-account" in js
+    js_has_account_router = "account=' + encodeURIComponent(selectedAccount)" in js
+    js_has_account_labels = "qingqing: '卿卿'" in js and "linlin: '老公'" in js
+    js_has_account_bar = "linqing-account-bar" in js
 
-    listing = get_json("/music/netease/playlists")
+    accounts = get_json("/music/linqing/accounts")
+    slot_ids = [str(x.get("id") or "") for x in (accounts.get("accounts") or [])]
+    has_two_slots = "qingqing" in slot_ids and "linlin" in slot_ids
+
+    listing = get_json("/music/netease/playlists?account=qingqing")
     owned = [p for p in (listing.get("playlists") or []) if p.get("mine")]
     if not owned:
         print("ERROR: no owned playlists returned")
@@ -50,8 +58,8 @@ def main() -> int:
         print("ERROR: target playlist has no id")
         return 3
 
-    first = get_json(f"/music/netease/playlist?id={pid}&offset=0&limit=100")
-    second = get_json(f"/music/netease/playlist?id={pid}&offset=100&limit=100")
+    first = get_json(f"/music/netease/playlist?id={pid}&offset=0&limit=100&account=qingqing")
+    second = get_json(f"/music/netease/playlist?id={pid}&offset=100&limit=100&account=qingqing")
 
     first_returned = int(first.get("returned") or len(first.get("songs") or []))
     second_returned = int(second.get("returned") or len(second.get("songs") or []))
@@ -60,6 +68,11 @@ def main() -> int:
     print(f"overlay_asset_page100={str(js_has_page_100).lower()}")
     print(f"overlay_asset_observer={str(js_has_observer).lower()}")
     print(f"overlay_asset_renderer={str(js_has_lazy_renderer).lower()}")
+    print(f"account_ui_key={str(js_has_account_key).lower()}")
+    print(f"account_ui_router={str(js_has_account_router).lower()}")
+    print(f"account_ui_labels={str(js_has_account_labels).lower()}")
+    print(f"account_ui_bar={str(js_has_account_bar).lower()}")
+    print(f"account_slots_present={str(has_two_slots).lower()}")
     print(
         f"page1_returned={first_returned} page1_more={str(bool(first.get('more'))).lower()} "
         f"page1_next={first.get('nextOffset')}"
@@ -76,6 +89,11 @@ def main() -> int:
         js_has_page_100,
         js_has_observer,
         js_has_lazy_renderer,
+        js_has_account_key,
+        js_has_account_router,
+        js_has_account_labels,
+        js_has_account_bar,
+        has_two_slots,
         first.get("ok"),
         second.get("ok"),
         first_returned == min(100, expected),
