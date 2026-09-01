@@ -2,8 +2,10 @@
 """Linqing music server overlay.
 
 Keeps upstream ``server/music.py`` intact and overrides only the pieces we need.
-Current change: rebuild complete NetEase playlists from the full ``trackIds`` list
-and expose page-based reads via ``offset`` + ``limit``.
+Current changes:
+- rebuild complete NetEase playlists from the full ``trackIds`` list
+- expose page-based reads via ``offset`` + ``limit``
+- inject the small Linqing client overlay that lazy-loads those pages
 
 Run:
     python3 server/music_linqing.py
@@ -25,6 +27,36 @@ class LinqingMusicHandler(MusicHandler):
 
     NETEASE_DETAIL_BATCH = 100
     NETEASE_PLAYLIST_PAGE_MAX = 500
+    CLIENT_OVERLAY_TAG = '<script src="/linqing-pagination.js"></script>'
+
+    def _serve_static(self, path: str):
+        """Serve upstream client, injecting our tiny JS overlay into index.html only."""
+        if path not in {"/", "/index.html"}:
+            return super()._serve_static(path)
+
+        target = HERE.parent / "client" / "index.html"
+        try:
+            html = target.read_text(encoding="utf-8")
+        except OSError:
+            return super()._serve_static(path)
+
+        if self.CLIENT_OVERLAY_TAG not in html:
+            if "</body>" in html:
+                html = html.replace(
+                    "</body>",
+                    self.CLIENT_OVERLAY_TAG + "\n</body>",
+                    1,
+                )
+            else:
+                html += "\n" + self.CLIENT_OVERLAY_TAG + "\n"
+
+        data = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
     @staticmethod
     def _normalize_netease_song(track: dict) -> dict:
