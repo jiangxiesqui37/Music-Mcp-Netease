@@ -37,13 +37,18 @@ def main() -> int:
     js_has_observer = "IntersectionObserver" in js
     js_has_lazy_renderer = "linqingRenderPlaylistDetail" in js
     js_has_account_key = "linqing-music-account" in js
-    js_has_account_router = "account=' + encodeURIComponent(selectedAccount)" in js
+    js_has_account_router = "u.searchParams.set('account', account)" in js
     js_has_account_labels = "qingqing: '卿卿'" in js and "linlin: '老公'" in js
     js_has_account_bar = "linqing-account-bar" in js
-    js_has_tab_restore = (
-        "linqing-music-tab-after-account-switch" in js
-        and "saveTabForAccountReload" in js
-        and "restoreTabAfterAccountReload" in js
+    js_has_hot_switch = (
+        "linqingHotAccountSwitch" in js
+        and "prefetchAccountCore" in js
+        and "location.reload()" not in js
+    )
+    js_has_warm_cache = (
+        "ACCOUNT_CACHE_TTL" in js
+        and "accountReadCache" in js
+        and "cachedAccountRead" in js
     )
 
     accounts = get_json("/music/linqing/accounts")
@@ -77,7 +82,8 @@ def main() -> int:
     print(f"account_ui_router={str(js_has_account_router).lower()}")
     print(f"account_ui_labels={str(js_has_account_labels).lower()}")
     print(f"account_ui_bar={str(js_has_account_bar).lower()}")
-    print(f"account_ui_tab_restore={str(js_has_tab_restore).lower()}")
+    print(f"account_ui_hot_switch={str(js_has_hot_switch).lower()}")
+    print(f"account_ui_warm_cache={str(js_has_warm_cache).lower()}")
     print(f"account_slots_present={str(has_two_slots).lower()}")
     print(
         f"page1_returned={first_returned} page1_more={str(bool(first.get('more'))).lower()} "
@@ -99,7 +105,8 @@ def main() -> int:
         js_has_account_router,
         js_has_account_labels,
         js_has_account_bar,
-        js_has_tab_restore,
+        js_has_hot_switch,
+        js_has_warm_cache,
         has_two_slots,
         first.get("ok"),
         second.get("ok"),
