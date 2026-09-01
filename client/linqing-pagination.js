@@ -7,6 +7,7 @@
 
   const PAGE_SIZE = 100;
   const ACCOUNT_KEY = 'linqing-music-account';
+  const TAB_RESTORE_KEY = 'linqing-music-tab-after-account-switch';
   const ACCOUNT_LABELS = { qingqing: '卿卿', linlin: '老公' };
   const originalRenderPlaylistDetail = renderPlaylistDetail;
   const baseApi = api;
@@ -25,6 +26,23 @@
     try { localStorage.setItem(ACCOUNT_KEY, account); } catch {}
   }
 
+  function saveTabForAccountReload() {
+    try { sessionStorage.setItem(TAB_RESTORE_KEY, currentTab || ''); } catch {}
+  }
+
+  function restoreTabAfterAccountReload() {
+    let tab = '';
+    try {
+      tab = sessionStorage.getItem(TAB_RESTORE_KEY) || '';
+      sessionStorage.removeItem(TAB_RESTORE_KEY);
+    } catch {}
+    if (!['home', 'playlists', 'discover'].includes(tab)) return;
+    currentTab = tab;
+    playlistDetail = null;
+    if (typeof updateNavActive === 'function') updateNavActive({ silent: true });
+    if (typeof renderTab === 'function') renderTab();
+  }
+
   function scopedPath(path) {
     if (typeof path !== 'string' || !path.startsWith('/music/')) return path;
     if (path.startsWith('/music/linqing/accounts')) return path;
@@ -39,6 +57,7 @@
   // Route all later player requests through the selected account. apiPost() in the
   // upstream client calls api(), so POSTs such as like/scrobble follow this too.
   api = accountApi;
+  restoreTabAfterAccountReload();
 
   function installAccountStyles() {
     if (document.getElementById('linqing-account-style')) return;
@@ -94,9 +113,11 @@
       btn.innerHTML = `${ACCOUNT_LABELS[id] || id}${slot.configured ? '' : '<span class="slot-dot"></span>'}`;
       btn.addEventListener('click', () => {
         if (!slot.configured || id === selectedAccount) return;
+        saveTabForAccountReload();
         selectedAccount = id;
         saveAccount(id);
         // Reload gives every upstream boot-time request the cleanest possible reset.
+        // The active tab is restored from sessionStorage immediately after reload.
         location.reload();
       });
       bar.appendChild(btn);
